@@ -1,0 +1,97 @@
+name: preview
+
+# Build the app on a GitHub macOS runner, publish to R2, then run baguette +
+# a cloudflared quick tunnel ON the runner so you can view the app live.
+# The runner is ephemeral: the URL lives only while this job is held open.
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: minutes to keep the preview URL alive
+        required: false
+        default: "30"
+
+jobs:
+  preview:
+    runs-on: macos-15        # Apple Silicon + macOS 15 (baguette needs arm64/15)
+    timeout-minutes: 60
+    env:
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: react-native-deploy
+      R2_PUBLIC_BASE_URL: https://pub-58ef2003db8642af966d3c08e6bfdf91.r2.dev
+      SCHEME: smokeapp
+      BUNDLE_ID: com.bidah.rndeploysmoke
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install rn-deploy (from the PR branch until #8 merges)
+        run: npm install -g 'github:bidah/react-native-deploy#bidah/e2e-and-realhost-fixes'
+
+      - name: Write deploy.config.json (no secrets — keys come from env)
+        run: |
+          cat > deploy.config.json <<JSON
+          {
+            "cli": { "version": "1.0.0" },
+            "host": { "kind": "github-actions", "repo": "bidah/rn-deploy-smoke-app", "workflow": "preview.yml", "ref": "main" },
+            "storage": { "kind": "r2", "accountId": "${R2_ACCOUNT_ID}", "bucket": "${R2_BUCKET}", "publicBaseUrl": "${R2_PUBLIC_BASE_URL}" },
+            "repo": { "url": "https://github.com/bidah/rn-deploy-smoke-app.git", "branch": "main" },
+            "build": { "preview": { "buildType": "expo", "scheme": "${SCHEME}", "buildConfiguration": "Release", "distribution": "simulator", "env": {} } },
+            "app": { "slug": "smokeapp" }
+          }
+          JSON
+          echo "wrote deploy.config.json"
+
+      - name: Build + publish to R2
+        run: rn-deploy run-build --profile preview
+
+      - name: Boot simulator + install the build
+        run: |
+          UDID=$(xcrun simctl list devices available --json | python3 -c "import sys,json;d=json.load(sys.stdin)['devices'];print(next(x['udid'] for rt in d for x in d[rt] if 'iPhone' in x['name'] and x['isAvailable']))")
+          echo "UDID=$UDID" >> "$GITHUB_ENV"
+          xcrun simctl boot "$UDID" || true
+          tar -xzf "build/${SCHEME}.app.tgz"
+          xcrun simctl install "$UDID" "${SCHEME}.app"
+          xcrun simctl launch "$UDID" "$BUNDLE_ID" || true
+
+      - name: Install baguette + cloudflared (standalone binaries)
+        run: |
+          VER=v0.1.3
+          mkdir -p "$HOME/.baguette/$VER"
+          curl -fL --retry 3 -o /tmp/b.tgz "https://github.com/tddworks/baguette/releases/download/$VER/baguette_${VER}_macOS_arm64.tar.gz"
+          tar -xzf /tmp/b.tgz -C "$HOME/.baguette/$VER"
+          chmod +x "$HOME/.baguette/$VER/baguette-$VER-macOS-arm64/Baguette"
+          mkdir -p "$HOME/.local/bin"
+          curl -fL --retry 3 -o /tmp/cf.tgz https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz
+          tar -xzf /tmp/cf.tgz -C "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/cloudflared"
+
+      - name: Serve baguette + open tunnel + hold open
+        run: |
+          VER=v0.1.3
+          B="$HOME/.baguette/$VER/baguette-$VER-macOS-arm64/Baguette"
+          nohup "$B" serve --host 127.0.0.1 --port 8421 >/tmp/baguette.log 2>&1 &
+          sleep 3
+          nohup "$HOME/.local/bin/cloudflared" tunnel --url http://localhost:8421 >/tmp/cf.log 2>&1 &
+          URL=""
+          for i in $(seq 1 40); do
+            URL=$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cf.log | head -1 || true)
+            [ -n "$URL" ] && break
+            sleep 2
+          done
+          echo "=================================================="
+          echo "PREVIEW URL: ${URL}/simulators"
+          echo "=================================================="
+          {
+            echo "## 🔗 Preview URL"
+            echo "[$URL/simulators](${URL}/simulators)"
+            echo ""
+            echo "Live for ${{ github.event.inputs.minutes }} minutes."
+          } >> "$GITHUB_STEP_SUMMARY"
+          MIN="${{ github.event.inputs.minutes }}"
+          sleep $(( ${MIN:-30} * 60 ))

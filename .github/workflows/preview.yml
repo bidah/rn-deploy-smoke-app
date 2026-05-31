@@ -93,16 +93,37 @@ jobs:
           tar -xzf /tmp/cf.tgz -C "$HOME/.local/bin"
           chmod +x "$HOME/.local/bin/cloudflared"
 
+      - name: Diagnose baguette CLI + simulator state
+        run: |
+          VER=v0.1.3
+          B="$HOME/.baguette/$VER/baguette-$VER-macOS-arm64/Baguette"
+          s3() { AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" AWS_REGION=auto aws s3 cp "$1" "s3://$R2_BUCKET/preview/$2" --endpoint-url "https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com" --content-type "$3" || true; }
+          {
+            echo "== baguette --help =="; "$B" --help 2>&1 || true
+            echo; echo "== baguette serve --help =="; "$B" serve --help 2>&1 || true
+            echo; echo "== UDID =="; echo "$UDID"
+            echo "== booted devices =="; xcrun simctl list devices booted
+            echo "== app container =="; xcrun simctl get_app_container "$UDID" "$BUNDLE_ID" 2>&1 || true
+          } > /tmp/diag.txt 2>&1
+          cat /tmp/diag.txt
+          s3 /tmp/diag.txt smokeapp-diag.txt text/plain
+
       - name: Start baguette + tunnel, publish URL to R2
         run: |
           VER=v0.1.3
           B="$HOME/.baguette/$VER/baguette-$VER-macOS-arm64/Baguette"
-          # Point baguette at the same device we installed onto, then make sure
-          # the app is in the foreground before streaming.
+          s3() { AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" AWS_REGION=auto aws s3 cp "$1" "s3://$R2_BUCKET/preview/$2" --endpoint-url "https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com" --content-type "$3" || true; }
+          # Point baguette at the device we installed onto; relaunch to foreground.
           "$B" boot --udid "$UDID" 2>/dev/null || true
           xcrun simctl launch "$UDID" "$BUNDLE_ID" || true
-          nohup "$B" serve --host 127.0.0.1 --port 8421 >/tmp/baguette.log 2>&1 &
+          nohup "$B" serve --host 127.0.0.1 --port 8421 --udid "$UDID" >/tmp/baguette.log 2>&1 &
           sleep 3
+          # if --udid isn't a valid flag, fall back to plain serve
+          if grep -qi "unknown\|unexpected\|usage" /tmp/baguette.log; then
+            pkill -f 'Baguette serve' 2>/dev/null || true
+            nohup "$B" serve --host 127.0.0.1 --port 8421 >/tmp/baguette.log 2>&1 &
+            sleep 3
+          fi
           nohup "$HOME/.local/bin/cloudflared" tunnel --url http://localhost:8421 >/tmp/cf.log 2>&1 &
           URL=""
           for i in $(seq 1 40); do
@@ -110,16 +131,16 @@ jobs:
             [ -n "$URL" ] && break
             sleep 2
           done
+          # capture a screenshot of the streamed device + baguette log for inspection
+          sleep 5
+          xcrun simctl io "$UDID" screenshot /tmp/shot.png 2>/tmp/shot.err || true
+          s3 /tmp/shot.png smokeapp-shot.png image/png
+          s3 /tmp/baguette.log smokeapp-baguette.log text/plain
           if [ -z "$URL" ]; then echo "no tunnel URL"; tail -25 /tmp/cf.log; exit 1; fi
           PREVIEW="$URL/simulators"
           echo "PREVIEW URL: $PREVIEW"
-          # publish so it can be read live (the runner is otherwise opaque mid-run).
-          # aws CLI reads AWS_* (not R2_*); map them. Non-fatal so the hold still runs.
           printf '%s' "$PREVIEW" > /tmp/url.txt
-          AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" AWS_REGION=auto \
-            aws s3 cp /tmp/url.txt "s3://$R2_BUCKET/preview/smokeapp-url.txt" \
-            --endpoint-url "https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com" --content-type text/plain \
-            || echo "warn: could not publish URL to R2 (continuing)"
+          s3 /tmp/url.txt smokeapp-url.txt text/plain
           { echo "## 🔗 Preview URL"; echo "[$PREVIEW]($PREVIEW)"; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Hold the runner open

@@ -71,25 +71,26 @@ jobs:
       - name: Build + publish to R2
         run: rn-deploy run-build --profile preview
 
-      - name: Boot simulator + install the build (isolated device set)
+      - name: Boot simulator + install the build (GUI rendering context)
         run: |
-          # Use a DEDICATED device set with exactly one device so baguette's UI
-          # shows only this simulator (the runner's default set has dozens, and
-          # it's easy to land on the wrong, app-less one).
-          SET="$HOME/.rnd-set"
-          rm -rf "$SET"; mkdir -p "$SET"
-          echo "SET=$SET" >> "$GITHUB_ENV"
-          # Name it after a real model so baguette's default "iPhones" filter matches it.
-          UDID=$(xcrun simctl --set "$SET" create "iPhone 16 Pro" "iPhone 16 Pro")
+          # Default device set + Simulator.app GUI: baguette's framebuffer capture
+          # needs a real rendering context, which a headless `simctl boot` doesn't
+          # provide (that's why the stream was 0 fps). Launching Simulator.app
+          # gives the booted device a live display for baguette to capture.
+          xcrun simctl shutdown all || true
+          UDID=$(xcrun simctl list devices available --json | python3 -c "import sys,json;d=json.load(sys.stdin)['devices'];print(next(x['udid'] for rt in sorted(d) for x in d[rt] if 'iPhone' in x['name'] and x['isAvailable']))")
           echo "UDID=$UDID" >> "$GITHUB_ENV"
-          xcrun simctl --set "$SET" boot "$UDID"
-          xcrun simctl --set "$SET" bootstatus "$UDID" -b
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          # bring up the Simulator GUI focused on this device
+          open -a Simulator --args -CurrentDeviceUDID "$UDID" || true
+          sleep 8
           tar -xzf "build/${SCHEME}.app.tgz"
-          xcrun simctl --set "$SET" install "$UDID" "${SCHEME}.app"
+          xcrun simctl install "$UDID" "${SCHEME}.app"
           BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "${SCHEME}.app/Info.plist")
           echo "BUNDLE_ID=$BUNDLE_ID" >> "$GITHUB_ENV"
-          echo "Installed app container: $(xcrun simctl --set "$SET" get_app_container "$UDID" "$BUNDLE_ID")"
-          xcrun simctl --set "$SET" launch "$UDID" "$BUNDLE_ID"
+          echo "Installed app container: $(xcrun simctl get_app_container "$UDID" "$BUNDLE_ID")"
+          xcrun simctl launch "$UDID" "$BUNDLE_ID"
 
       - name: Install baguette + cloudflared (standalone binaries)
         run: |
@@ -110,9 +111,10 @@ jobs:
           s3() { AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" AWS_REGION=auto aws s3 cp "$1" "s3://$R2_BUCKET/preview/$2" --endpoint-url "https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com" --content-type "$3" || true; }
           {
             echo "== UDID =="; echo "$UDID"
-            echo "== device set =="; echo "$SET"
-            echo "== devices in set =="; xcrun simctl --set "$SET" list devices
-            echo "== app container =="; xcrun simctl --set "$SET" get_app_container "$UDID" "$BUNDLE_ID" 2>&1 || true
+            echo "== DEVELOPER_DIR =="; echo "$DEVELOPER_DIR"
+            echo "== booted devices =="; xcrun simctl list devices booted
+            echo "== Simulator.app running? =="; pgrep -fl Simulator.app || echo "not running"
+            echo "== app container =="; xcrun simctl get_app_container "$UDID" "$BUNDLE_ID" 2>&1 || true
           } > /tmp/diag.txt 2>&1
           cat /tmp/diag.txt
           s3 /tmp/diag.txt smokeapp-diag.txt text/plain
@@ -122,9 +124,10 @@ jobs:
           VER=v0.1.3
           B="$HOME/.baguette/$VER/baguette-$VER-macOS-arm64/Baguette"
           s3() { AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" AWS_REGION=auto aws s3 cp "$1" "s3://$R2_BUCKET/preview/$2" --endpoint-url "https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com" --content-type "$3" || true; }
-          # Serve ONLY our dedicated device set, and relaunch to foreground first.
-          xcrun simctl --set "$SET" launch "$UDID" "$BUNDLE_ID" || true
-          nohup "$B" serve --host 127.0.0.1 --port 8421 --device-set "$SET" >/tmp/baguette.log 2>&1 &
+          # Relaunch to foreground, then serve the default set (Simulator.app GUI
+          # is providing the render context).
+          xcrun simctl launch "$UDID" "$BUNDLE_ID" || true
+          nohup "$B" serve --host 127.0.0.1 --port 8421 >/tmp/baguette.log 2>&1 &
           sleep 3
           nohup "$HOME/.local/bin/cloudflared" tunnel --url http://localhost:8421 >/tmp/cf.log 2>&1 &
           URL=""
@@ -135,7 +138,7 @@ jobs:
           done
           # capture a screenshot of the streamed device + baguette log for inspection
           sleep 5
-          xcrun simctl --set "$SET" io "$UDID" screenshot /tmp/shot.png 2>/tmp/shot.err || true
+          xcrun simctl io "$UDID" screenshot /tmp/shot.png 2>/tmp/shot.err || true
           s3 /tmp/shot.png smokeapp-shot.png image/png
           s3 /tmp/baguette.log smokeapp-baguette.log text/plain
           if [ -z "$URL" ]; then echo "no tunnel URL"; tail -25 /tmp/cf.log; exit 1; fi

@@ -30,17 +30,15 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Pin ONE Xcode for the whole job (matches Simulator.app default)
+      - name: Pin ONE Xcode 26 for the whole job
         run: |
           echo "Installed Xcodes:"; ls -d /Applications/Xcode*.app 2>/dev/null || true
-          # Use the same Xcode that `open -a Simulator` will launch (the system
-          # default Simulator.app). Everything — build, simctl, the booted
-          # runtime, Simulator.app, baguette — must be ONE Xcode, or baguette
-          # loads multiple SimulatorKits (duplicate-class crash => 0 fps stream).
-          SIMAPP=$(defaults read com.apple.dt.Xcode IDEApplicationwideBuildSettings 2>/dev/null; mdfind -name Simulator.app 2>/dev/null | grep -m1 '/Applications/Xcode' || true)
-          XC=$(/usr/bin/python3 -c "import subprocess;print(subprocess.run(['mdfind','kMDItemCFBundleIdentifier==com.apple.iphonesimulator'],capture_output=True,text=True).stdout.strip().split(chr(10))[0])" 2>/dev/null)
-          XC_APP=$(echo "$XC" | sed -E 's#(/Applications/Xcode[^/]*\.app)/.*#\1#')
-          if [ -z "$XC_APP" ] || [ ! -d "$XC_APP" ]; then XC_APP=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1); fi
+          # Build needs Xcode 26 (Swift 6.2). EVERYTHING — build, simctl, the
+          # booted runtime, Simulator.app, baguette — must use this SAME Xcode,
+          # or baguette loads multiple SimulatorKits (duplicate-class crash => 0
+          # fps stream). We launch this exact Xcode's Simulator.app later.
+          XC_APP=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          [ -z "$XC_APP" ] && XC_APP=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
           echo "Chosen Xcode: $XC_APP"
           sudo xcode-select -s "$XC_APP/Contents/Developer"
           echo "DEVELOPER_DIR=$XC_APP/Contents/Developer" >> "$GITHUB_ENV"

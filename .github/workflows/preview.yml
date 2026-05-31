@@ -66,12 +66,20 @@ jobs:
 
       - name: Boot simulator + install the build
         run: |
-          UDID=$(xcrun simctl list devices available --json | python3 -c "import sys,json;d=json.load(sys.stdin)['devices'];print(next(x['udid'] for rt in d for x in d[rt] if 'iPhone' in x['name'] and x['isAvailable']))")
+          # Shut everything down so exactly ONE device is booted — baguette then
+          # has no ambiguity about which simulator to stream.
+          xcrun simctl shutdown all || true
+          UDID=$(xcrun simctl list devices available --json | python3 -c "import sys,json;d=json.load(sys.stdin)['devices'];print(next(x['udid'] for rt in sorted(d) for x in d[rt] if 'iPhone' in x['name'] and x['isAvailable']))")
           echo "UDID=$UDID" >> "$GITHUB_ENV"
-          xcrun simctl boot "$UDID" || true
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
           tar -xzf "build/${SCHEME}.app.tgz"
           xcrun simctl install "$UDID" "${SCHEME}.app"
-          xcrun simctl launch "$UDID" "$BUNDLE_ID" || true
+          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "${SCHEME}.app/Info.plist")
+          echo "BUNDLE_ID=$BUNDLE_ID" >> "$GITHUB_ENV"
+          echo "Installed app container: $(xcrun simctl get_app_container "$UDID" "$BUNDLE_ID")"
+          xcrun simctl launch "$UDID" "$BUNDLE_ID"
+          echo "Booted devices:"; xcrun simctl list devices booted
 
       - name: Install baguette + cloudflared (standalone binaries)
         run: |
@@ -89,6 +97,10 @@ jobs:
         run: |
           VER=v0.1.3
           B="$HOME/.baguette/$VER/baguette-$VER-macOS-arm64/Baguette"
+          # Point baguette at the same device we installed onto, then make sure
+          # the app is in the foreground before streaming.
+          "$B" boot --udid "$UDID" 2>/dev/null || true
+          xcrun simctl launch "$UDID" "$BUNDLE_ID" || true
           nohup "$B" serve --host 127.0.0.1 --port 8421 >/tmp/baguette.log 2>&1 &
           sleep 3
           nohup "$HOME/.local/bin/cloudflared" tunnel --url http://localhost:8421 >/tmp/cf.log 2>&1 &

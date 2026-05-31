@@ -30,17 +30,21 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Select newest Xcode + pin it for the whole job
+      - name: Pin ONE Xcode for the whole job (matches Simulator.app default)
         run: |
           echo "Installed Xcodes:"; ls -d /Applications/Xcode*.app 2>/dev/null || true
-          LATEST=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
-          if [ -n "$LATEST" ]; then sudo xcode-select -s "$LATEST/Contents/Developer"; fi
-          # Pin DEVELOPER_DIR for every later step so simctl AND baguette load a
-          # SINGLE SimulatorKit. Mixed Xcodes => duplicate-class collisions that
-          # break baguette's framebuffer stream (0 fps).
-          echo "DEVELOPER_DIR=$LATEST/Contents/Developer" >> "$GITHUB_ENV"
-          # Restart CoreSimulator service so it runs under the selected Xcode
-          # (the runner pre-warms it under the default Xcode).
+          # Use the same Xcode that `open -a Simulator` will launch (the system
+          # default Simulator.app). Everything — build, simctl, the booted
+          # runtime, Simulator.app, baguette — must be ONE Xcode, or baguette
+          # loads multiple SimulatorKits (duplicate-class crash => 0 fps stream).
+          SIMAPP=$(defaults read com.apple.dt.Xcode IDEApplicationwideBuildSettings 2>/dev/null; mdfind -name Simulator.app 2>/dev/null | grep -m1 '/Applications/Xcode' || true)
+          XC=$(/usr/bin/python3 -c "import subprocess;print(subprocess.run(['mdfind','kMDItemCFBundleIdentifier==com.apple.iphonesimulator'],capture_output=True,text=True).stdout.strip().split(chr(10))[0])" 2>/dev/null)
+          XC_APP=$(echo "$XC" | sed -E 's#(/Applications/Xcode[^/]*\.app)/.*#\1#')
+          if [ -z "$XC_APP" ] || [ ! -d "$XC_APP" ]; then XC_APP=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1); fi
+          echo "Chosen Xcode: $XC_APP"
+          sudo xcode-select -s "$XC_APP/Contents/Developer"
+          echo "DEVELOPER_DIR=$XC_APP/Contents/Developer" >> "$GITHUB_ENV"
+          echo "XC_APP=$XC_APP" >> "$GITHUB_ENV"
           sudo pkill -9 -f CoreSimulatorService 2>/dev/null || true
           xcodebuild -version
           swift --version || true
@@ -78,12 +82,14 @@ jobs:
           # provide (that's why the stream was 0 fps). Launching Simulator.app
           # gives the booted device a live display for baguette to capture.
           xcrun simctl shutdown all || true
-          UDID=$(xcrun simctl list devices available --json | python3 -c "import sys,json;d=json.load(sys.stdin)['devices'];print(next(x['udid'] for rt in sorted(d) for x in d[rt] if 'iPhone' in x['name'] and x['isAvailable']))")
+          # Pick an iPhone on the LATEST iOS runtime (reverse sort) so it matches
+          # baguette's "Latest Runtime" filter AND the pinned Xcode's runtime.
+          UDID=$(xcrun simctl list devices available --json | python3 -c "import sys,json;d=json.load(sys.stdin)['devices'];print(next(x['udid'] for rt in sorted(d, reverse=True) for x in d[rt] if 'iPhone' in x['name'] and x['isAvailable']))")
           echo "UDID=$UDID" >> "$GITHUB_ENV"
           xcrun simctl boot "$UDID"
           xcrun simctl bootstatus "$UDID" -b
-          # bring up the Simulator GUI focused on this device
-          open -a Simulator --args -CurrentDeviceUDID "$UDID" || true
+          # bring up the Simulator GUI (same Xcode) focused on this device for a render context
+          open -a "$XC_APP/Contents/Developer/Applications/Simulator.app" --args -CurrentDeviceUDID "$UDID" || open -a Simulator --args -CurrentDeviceUDID "$UDID" || true
           sleep 8
           tar -xzf "build/${SCHEME}.app.tgz"
           xcrun simctl install "$UDID" "${SCHEME}.app"

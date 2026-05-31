@@ -30,11 +30,18 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Select newest Xcode (Expo SDK needs Swift 6.2 / Xcode 26)
+      - name: Select newest Xcode + pin it for the whole job
         run: |
           echo "Installed Xcodes:"; ls -d /Applications/Xcode*.app 2>/dev/null || true
           LATEST=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
           if [ -n "$LATEST" ]; then sudo xcode-select -s "$LATEST/Contents/Developer"; fi
+          # Pin DEVELOPER_DIR for every later step so simctl AND baguette load a
+          # SINGLE SimulatorKit. Mixed Xcodes => duplicate-class collisions that
+          # break baguette's framebuffer stream (0 fps).
+          echo "DEVELOPER_DIR=$LATEST/Contents/Developer" >> "$GITHUB_ENV"
+          # Restart CoreSimulator service so it runs under the selected Xcode
+          # (the runner pre-warms it under the default Xcode).
+          sudo pkill -9 -f CoreSimulatorService 2>/dev/null || true
           xcodebuild -version
           swift --version || true
 
@@ -72,7 +79,8 @@ jobs:
           SET="$HOME/.rnd-set"
           rm -rf "$SET"; mkdir -p "$SET"
           echo "SET=$SET" >> "$GITHUB_ENV"
-          UDID=$(xcrun simctl --set "$SET" create "Preview iPhone" "iPhone 16 Pro")
+          # Name it after a real model so baguette's default "iPhones" filter matches it.
+          UDID=$(xcrun simctl --set "$SET" create "iPhone 16 Pro" "iPhone 16 Pro")
           echo "UDID=$UDID" >> "$GITHUB_ENV"
           xcrun simctl --set "$SET" boot "$UDID"
           xcrun simctl --set "$SET" bootstatus "$UDID" -b

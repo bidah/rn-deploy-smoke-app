@@ -33,6 +33,9 @@ yarn-error.*
 # local env files
 .env*.local
 
+# rn-deploy local config (contains storage account + host refs)
+deploy.config.json
+
 # typescript
 *.tsbuildinfo
 

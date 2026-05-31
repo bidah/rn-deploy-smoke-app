@@ -101,10 +101,13 @@ jobs:
           if [ -z "$URL" ]; then echo "no tunnel URL"; tail -25 /tmp/cf.log; exit 1; fi
           PREVIEW="$URL/simulators"
           echo "PREVIEW URL: $PREVIEW"
-          # publish so it can be read live (the runner is otherwise opaque mid-run)
+          # publish so it can be read live (the runner is otherwise opaque mid-run).
+          # aws CLI reads AWS_* (not R2_*); map them. Non-fatal so the hold still runs.
           printf '%s' "$PREVIEW" > /tmp/url.txt
-          aws s3 cp /tmp/url.txt "s3://$R2_BUCKET/preview/smokeapp-url.txt" \
-            --endpoint-url "https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com" --content-type text/plain
+          AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" AWS_REGION=auto \
+            aws s3 cp /tmp/url.txt "s3://$R2_BUCKET/preview/smokeapp-url.txt" \
+            --endpoint-url "https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com" --content-type text/plain \
+            || echo "warn: could not publish URL to R2 (continuing)"
           { echo "## 🔗 Preview URL"; echo "[$PREVIEW]($PREVIEW)"; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Hold the runner open

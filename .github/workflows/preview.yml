@@ -15,7 +15,7 @@ on:
 jobs:
   preview:
     runs-on: macos-15        # Apple Silicon + macOS 15 (baguette needs arm64/15)
-    timeout-minutes: 60
+    timeout-minutes: 80
     env:
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}

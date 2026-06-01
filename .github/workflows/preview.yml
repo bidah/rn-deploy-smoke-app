@@ -30,20 +30,35 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Pin ONE Xcode 26 for the whole job
+      - name: Pin ONE Xcode 26 + DISABLE all others
         run: |
           echo "Installed Xcodes:"; ls -d /Applications/Xcode*.app 2>/dev/null || true
           # Build needs Xcode 26 (Swift 6.2). EVERYTHING — build, simctl, the
-          # booted runtime, Simulator.app, baguette — must use this SAME Xcode,
-          # or baguette loads multiple SimulatorKits (duplicate-class crash => 0
-          # fps stream). We launch this exact Xcode's Simulator.app later.
+          # booted runtime, Simulator.app, baguette — must use this SAME Xcode.
+          # The runner ships several Xcodes; baguette dlopen's SimulatorKit and
+          # ends up loading TWO copies (e.g. 16.4 + 26.3) => duplicate-class
+          # collisions => 0-fps stream. Fix: physically rename every OTHER Xcode
+          # aside so only ONE SimulatorKit exists on the whole machine.
           XC_APP=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
           [ -z "$XC_APP" ] && XC_APP=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
-          echo "Chosen Xcode: $XC_APP"
-          sudo xcode-select -s "$XC_APP/Contents/Developer"
-          echo "DEVELOPER_DIR=$XC_APP/Contents/Developer" >> "$GITHUB_ENV"
-          echo "XC_APP=$XC_APP" >> "$GITHUB_ENV"
+          # resolve through any version symlink to the real bundle
+          XC_REAL=$(python3 -c "import os,sys;print(os.path.realpath(sys.argv[1]))" "$XC_APP")
+          echo "Chosen Xcode: $XC_APP  (real: $XC_REAL)"
+          sudo xcode-select -s "$XC_REAL/Contents/Developer"
+          echo "DEVELOPER_DIR=$XC_REAL/Contents/Developer" >> "$GITHUB_ENV"
+          echo "XC_APP=$XC_REAL" >> "$GITHUB_ENV"
+          # Kill any sim service still bound to the old Xcode
           sudo pkill -9 -f CoreSimulatorService 2>/dev/null || true
+          sleep 2
+          # Disable every Xcode bundle that is NOT our chosen one (rename = instant)
+          for app in /Applications/Xcode*.app; do
+            REAL=$(python3 -c "import os,sys;print(os.path.realpath(sys.argv[1]))" "$app")
+            if [ "$REAL" != "$XC_REAL" ]; then
+              echo "disabling $app -> ${app}.disabled (real: $REAL)"
+              sudo mv "$app" "${app}.disabled" 2>/dev/null || true
+            fi
+          done
+          echo "Remaining Xcodes:"; ls -d /Applications/Xcode*.app 2>/dev/null || true
           xcodebuild -version
           swift --version || true
 
@@ -86,8 +101,12 @@ jobs:
           echo "UDID=$UDID" >> "$GITHUB_ENV"
           xcrun simctl boot "$UDID"
           xcrun simctl bootstatus "$UDID" -b
-          # bring up the Simulator GUI (same Xcode) focused on this device for a render context
-          open -a "$XC_APP/Contents/Developer/Applications/Simulator.app" --args -CurrentDeviceUDID "$UDID" || open -a Simulator --args -CurrentDeviceUDID "$UDID" || true
+          # bring up the Simulator GUI by EXACT binary path (not `open -a`, which
+          # lets LaunchServices pick a different registered Simulator.app) so the
+          # render context comes from the same Xcode as everything else.
+          SIM_BIN="$XC_APP/Contents/Developer/Applications/Simulator.app/Contents/MacOS/Simulator"
+          echo "Launching: $SIM_BIN"
+          nohup "$SIM_BIN" -CurrentDeviceUDID "$UDID" >/tmp/sim.log 2>&1 &
           sleep 8
           tar -xzf "build/${SCHEME}.app.tgz"
           xcrun simctl install "$UDID" "${SCHEME}.app"

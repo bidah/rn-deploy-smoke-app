@@ -50,15 +50,24 @@ jobs:
           # Kill any sim service still bound to the old Xcode
           sudo pkill -9 -f CoreSimulatorService 2>/dev/null || true
           sleep 2
-          # Disable every Xcode bundle that is NOT our chosen one (rename = instant)
-          for app in /Applications/Xcode*.app; do
+          # Disable every Xcode bundle that is NOT our chosen one (rename = instant).
+          # Skip the generic /Applications/Xcode.app symlink — we re-point it below.
+          for app in /Applications/Xcode_*.app; do
             REAL=$(python3 -c "import os,sys;print(os.path.realpath(sys.argv[1]))" "$app")
             if [ "$REAL" != "$XC_REAL" ]; then
               echo "disabling $app -> ${app}.disabled (real: $REAL)"
               sudo mv "$app" "${app}.disabled" 2>/dev/null || true
             fi
           done
-          echo "Remaining Xcodes:"; ls -d /Applications/Xcode*.app 2>/dev/null || true
+          # baguette's binary has a HARDCODED rpath to
+          #   /Applications/Xcode.app/Contents/Developer/Library/PrivateFrameworks/SimulatorKit.framework
+          # so the generic Xcode.app MUST exist and point at our chosen Xcode —
+          # otherwise baguette either loads a DIFFERENT Xcode's SimulatorKit
+          # (dual-load => 0 fps) or fails to load it at all (dyld crash).
+          sudo rm -rf /Applications/Xcode.app
+          sudo ln -s "$XC_REAL" /Applications/Xcode.app
+          echo "Xcode.app -> $(python3 -c "import os;print(os.path.realpath('/Applications/Xcode.app'))")"
+          echo "Remaining Xcodes:"; ls -ld /Applications/Xcode*.app 2>/dev/null || true
           xcodebuild -version
           swift --version || true
 
